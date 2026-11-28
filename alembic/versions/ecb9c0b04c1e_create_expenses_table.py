@@ -1,7 +1,6 @@
 """create expenses table
 
 Revision ID: ecb9c0b04c1e
-Revises: 
 Create Date: 2026-11-26 19:50:17.186504
 
 """
