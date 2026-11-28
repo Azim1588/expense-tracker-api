@@ -1,8 +1,11 @@
-from datetime import date
-from decimal import Decimal
+from fastapi import FastAPI, HTTPException, Response, Depends
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
-from fastapi import FastAPI, HTTPException, Response
-from pydantic import BaseModel, Field
+from database import get_db
+from models import Expense
+from schemas import ExpenseCreate, ExpenseUpdate, ExpenseResponse
+from exceptions import register_exception_handlers
 
 
 # =====================================================
@@ -15,32 +18,37 @@ app = FastAPI(
     version="1.0.0",
 )
 
-
-# =====================================================
-# 2. Define Pydantic Models
-# =====================================================
-
-# Request model: data provided by the client
-class ExpenseCreate(BaseModel):
-    name: str = Field(min_length=1)
-    amount: Decimal = Field(gt=0)
-    category: str = Field(min_length=1)
-    date: date
-
-
-# Response model: data returned by the server
-class ExpenseResponse(ExpenseCreate):
-    id: int
+# Register centralized database exception handlers
+register_exception_handlers(app)
 
 
 # =====================================================
-# 3. Initialize In-Memory Storage
+# 2. Pydantic Models
 # =====================================================
 
-expenses: list[ExpenseResponse] = []
+# Request and response models are imported from schemas.py.
+#
+# ExpenseCreate   — Validates incoming expense data.
+# ExpenseUpdate   — Validates expense update data.
+# ExpenseResponse — Defines the API response structure.
 
-# Counter for generating unique expense IDs
-next_expense_id = 1
+
+# =====================================================
+# 3. Database Storage and Session Management
+# =====================================================
+
+# PostgreSQL replaces the previous in-memory list.
+#
+# Expense — SQLAlchemy ORM model defined in models.py.
+# get_db  — Database session dependency from database.py.
+# Session — Manages database operations and transactions.
+#
+# PostgreSQL automatically generates unique expense IDs.
+# FastAPI provides a database session for each CRUD request.
+#
+# Failed transactions are rolled back in database.py.
+# Database exceptions are handled in exceptions.py.
+# Database sessions are closed after each request.
 
 
 # =====================================================
@@ -52,20 +60,24 @@ next_expense_id = 1
     response_model=ExpenseResponse,
     status_code=201
 )
-def create_expense(expense: ExpenseCreate):
-    global next_expense_id
+def create_expense(
+    expense: ExpenseCreate,
+    db: Session = Depends(get_db)
+):
 
-    # Create a new expense with a server-generated ID
-    new_expense = ExpenseResponse(
-        id=next_expense_id,
+    # Convert validated Pydantic data into a SQLAlchemy object
+    new_expense = Expense(
         **expense.model_dump()
     )
 
-    # Increment ID for the next expense
-    next_expense_id += 1
+    # Register the new expense with the database session
+    db.add(new_expense)
 
-    # Store the expense
-    expenses.append(new_expense)
+    # Execute pending changes and commit the transaction
+    db.commit()
+
+    # Reload the expense with database-generated values
+    db.refresh(new_expense)
 
     # Return the created expense
     return new_expense
@@ -80,7 +92,15 @@ def create_expense(expense: ExpenseCreate):
     response_model=list[ExpenseResponse],
     status_code=200
 )
-def get_expenses():
+def get_expenses(
+    db: Session = Depends(get_db)
+):
+
+    # Construct a SELECT statement ordered by expense ID
+    statement = select(Expense).order_by(Expense.id)
+
+    # Execute the query and retrieve all expense objects
+    expenses = db.scalars(statement).all()
 
     # Return all stored expenses
     return expenses
@@ -95,19 +115,23 @@ def get_expenses():
     response_model=ExpenseResponse,
     status_code=200
 )
-def get_expense(expense_id: int):
+def get_expense(
+    expense_id: int,
+    db: Session = Depends(get_db)
+):
 
-    # Search for the expense by ID
-    for expense in expenses:
-
-        if expense.id == expense_id:
-            return expense
+    # Retrieve the expense using its primary key
+    expense = db.get(Expense, expense_id)
 
     # Expense does not exist
-    raise HTTPException(
-        status_code=404,
-        detail="Expense not found"
-    )
+    if expense is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Expense not found"
+        )
+
+    # Return the requested expense
+    return expense
 
 
 # =====================================================
@@ -121,31 +145,34 @@ def get_expense(expense_id: int):
 )
 def update_expense(
     expense_id: int,
-    updated_data: ExpenseCreate
+    updated_data: ExpenseUpdate,
+    db: Session = Depends(get_db)
 ):
 
-    # Search for the existing expense
-    for index, expense in enumerate(expenses):
-
-        if expense.id == expense_id:
-
-            # Create updated expense while preserving ID
-            updated_expense = ExpenseResponse(
-                id=expense_id,
-                **updated_data.model_dump()
-            )
-
-            # Replace the old expense
-            expenses[index] = updated_expense
-
-            # Return updated expense
-            return updated_expense
+    # Retrieve the existing expense using its primary key
+    expense = db.get(Expense, expense_id)
 
     # Expense does not exist
-    raise HTTPException(
-        status_code=404,
-        detail="Expense not found"
-    )
+    if expense is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Expense not found"
+        )
+
+    # Update expense attributes while preserving its ID
+    expense.name = updated_data.name
+    expense.amount = updated_data.amount
+    expense.category = updated_data.category
+    expense.date = updated_data.date
+
+    # Persist the updated expense in PostgreSQL
+    db.commit()
+
+    # Reload the updated expense from the database
+    db.refresh(expense)
+
+    # Return the updated expense
+    return expense
 
 
 # =====================================================
@@ -156,24 +183,29 @@ def update_expense(
     "/expenses/{expense_id}",
     status_code=204
 )
-def delete_expense(expense_id: int):
+def delete_expense(
+    expense_id: int,
+    db: Session = Depends(get_db)
+):
 
-    # Search for the expense
-    for index, expense in enumerate(expenses):
-
-        if expense.id == expense_id:
-
-            # Remove expense from storage
-            expenses.pop(index)
-
-            # Return HTTP 204 with no response body
-            return Response(status_code=204)
+    # Retrieve the expense using its primary key
+    expense = db.get(Expense, expense_id)
 
     # Expense does not exist
-    raise HTTPException(
-        status_code=404,
-        detail="Expense not found"
-    )
+    if expense is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Expense not found"
+        )
+
+    # Mark the expense for deletion
+    db.delete(expense)
+
+    # Commit the deletion to PostgreSQL
+    db.commit()
+
+    # Return HTTP 204 with no response body
+    return Response(status_code=204)
 
 
 # =====================================================
@@ -186,4 +218,5 @@ def delete_expense(expense_id: int):
 )
 def health_check():
 
+    # Verify that the FastAPI application is running
     return {"status": "ok"}
