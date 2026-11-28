@@ -1,326 +1,305 @@
 import pytest
-import main
 
-from fastapi.testclient import TestClient
+from decimal import Decimal
+from sqlalchemy import select
 
-
-# =====================================================
-# 1. TEST CLIENT
-# =====================================================
-
-client = TestClient(main.app)
+from models import Expense
 
 
 # =====================================================
-# 2. TEST ISOLATION
+# 1. CREATE EXPENSE
 # =====================================================
 
-@pytest.fixture(autouse=True)
-def reset_expenses():
-    """
-    Reset in-memory storage before and after each test.
-    This ensures tests are independent.
-    """
+def test_create_expense(client, sample_expense, db_session):
 
-    # Setup
-    main.expenses.clear()
-    main.next_expense_id = 1
-
-    yield
-
-    # Cleanup
-    main.expenses.clear()
-    main.next_expense_id = 1
-
-
-# =====================================================
-# 3. REUSABLE TEST DATA
-# =====================================================
-
-def sample_expense():
-    """
-    Return valid expense data for testing.
-    """
-
-    return {
-        "name": "Groceries",
-        "amount": "85.50",
-        "category": "Food",
-        "date": "2026-11-23"
-    }
-
-
-# =====================================================
-# TEST 1: CREATE EXPENSE
-# POST /expenses/
-# Expected: 201 Created
-# =====================================================
-
-def test_create_expense():
-
-    # ARRANGE
-    request_data = sample_expense()
-
-    # ACT
     response = client.post(
         "/expenses/",
-        json=request_data
+        json=sample_expense
     )
 
-    # ASSERT
     assert response.status_code == 201
 
-    response_data = response.json()
+    data = response.json()
 
-    assert response_data["id"] == 1
-    assert response_data["name"] == "Groceries"
-    assert response_data["amount"] == "85.50"
-    assert response_data["category"] == "Food"
-    assert response_data["date"] == "2026-11-23"
+    assert isinstance(data["id"], int)
+    assert data["name"] == sample_expense["name"]
+    assert Decimal(data["amount"]) == Decimal("75.50")
+    assert data["category"] == sample_expense["category"]
+    assert data["date"] == sample_expense["date"]
 
-    # Verify expense was stored
-    assert len(main.expenses) == 1
+    # Verify PostgreSQL persistence
+    expense = db_session.get(Expense, data["id"])
+
+    assert expense is not None
+    assert expense.name == sample_expense["name"]
+    assert expense.amount == Decimal("75.50")
 
 
 # =====================================================
-# TEST 2: GET ALL EXPENSES
-# GET /expenses/
-# Expected: 200 OK
+# 2. READ EMPTY COLLECTION
 # =====================================================
 
-def test_get_all_expenses():
+def test_get_empty_expenses(client):
 
-    # ARRANGE
-    client.post(
-        "/expenses/",
-        json=sample_expense()
-    )
-
-    # ACT
     response = client.get("/expenses/")
 
-    # ASSERT
     assert response.status_code == 200
-
-    response_data = response.json()
-
-    assert isinstance(response_data, list)
-    assert len(response_data) == 1
-    assert response_data[0]["name"] == "Groceries"
+    assert response.json() == []
 
 
 # =====================================================
-# TEST 3: GET EXPENSE BY ID
-# GET /expenses/{expense_id}
-# Expected: 200 OK
+# 3. READ MULTIPLE EXPENSES
 # =====================================================
 
-def test_get_expense_by_id():
+def test_get_multiple_expenses(client, sample_expense):
 
-    # ARRANGE
-    create_response = client.post(
+    first = client.post(
         "/expenses/",
-        json=sample_expense()
+        json=sample_expense
     )
 
-    expense_id = create_response.json()["id"]
-
-    # ACT
-    response = client.get(
-        f"/expenses/{expense_id}"
+    second = client.post(
+        "/expenses/",
+        json={
+            **sample_expense,
+            "name": "Internet Bill"
+        }
     )
 
-    # ASSERT
+    assert first.status_code == 201
+    assert second.status_code == 201
+
+    response = client.get("/expenses/")
+
     assert response.status_code == 200
-
-    response_data = response.json()
-
-    assert response_data["id"] == expense_id
-    assert response_data["name"] == "Groceries"
-    assert response_data["amount"] == "85.50"
+    assert len(response.json()) == 2
 
 
 # =====================================================
-# TEST 4: UPDATE EXPENSE
-# PUT /expenses/{expense_id}
-# Expected: 200 OK
+# 4. READ SINGLE EXPENSE
 # =====================================================
 
-def test_update_expense():
+def test_get_expense_by_id(client, sample_expense):
 
-    # ARRANGE
-    create_response = client.post(
+    created = client.post(
         "/expenses/",
-        json=sample_expense()
+        json=sample_expense
     )
 
-    expense_id = create_response.json()["id"]
+    assert created.status_code == 201
 
-    updated_data = {
-        "name": "Weekly Groceries",
-        "amount": "120.75",
-        "category": "Food",
-        "date": "2026-11-23"
+    expense_id = created.json()["id"]
+
+    response = client.get(f"/expenses/{expense_id}")
+
+    assert response.status_code == 200
+    assert response.json()["id"] == expense_id
+    assert response.json()["name"] == sample_expense["name"]
+
+
+# =====================================================
+# 5. READ NONEXISTENT EXPENSE
+# =====================================================
+
+def test_get_expense_not_found(client):
+
+    response = client.get("/expenses/999999")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Expense not found"
+
+
+# =====================================================
+# 6. UPDATE EXPENSE
+# =====================================================
+
+def test_update_expense(client, sample_expense, db_session):
+
+    created = client.post(
+        "/expenses/",
+        json=sample_expense
+    )
+
+    assert created.status_code == 201
+
+    expense_id = created.json()["id"]
+
+    updated_payload = {
+        "name": "Updated Groceries",
+        "amount": "95.00",
+        "category": "Shopping",
+        "date": "2026-11-27"
     }
 
-    # ACT
     response = client.put(
         f"/expenses/{expense_id}",
-        json=updated_data
+        json=updated_payload
     )
 
-    # ASSERT
     assert response.status_code == 200
+    assert response.json()["name"] == "Updated Groceries"
+    assert Decimal(response.json()["amount"]) == Decimal("95.00")
 
-    response_data = response.json()
+    # Verify database update
+    expense = db_session.get(Expense, expense_id)
 
-    assert response_data["id"] == expense_id
-    assert response_data["name"] == "Weekly Groceries"
-    assert response_data["amount"] == "120.75"
+    assert expense is not None
+    assert expense.name == "Updated Groceries"
+    assert expense.amount == Decimal("95.00")
 
-    # Verify updated data was stored
-    get_response = client.get(
-        f"/expenses/{expense_id}"
+
+# =====================================================
+# 7. UPDATE NONEXISTENT EXPENSE
+# =====================================================
+
+def test_update_expense_not_found(client, sample_expense):
+
+    response = client.put(
+        "/expenses/999999",
+        json=sample_expense
     )
 
-    assert get_response.status_code == 200
-    assert get_response.json()["name"] == "Weekly Groceries"
+    assert response.status_code == 404
 
 
 # =====================================================
-# TEST 5: DELETE EXPENSE
-# DELETE /expenses/{expense_id}
-# Expected: 204 No Content
+# 8. DELETE EXPENSE
 # =====================================================
 
-def test_delete_expense():
+def test_delete_expense(client, sample_expense, db_session):
 
-    # ARRANGE
-    create_response = client.post(
+    created = client.post(
         "/expenses/",
-        json=sample_expense()
+        json=sample_expense
     )
 
-    expense_id = create_response.json()["id"]
+    assert created.status_code == 201
 
-    # ACT
-    response = client.delete(
-        f"/expenses/{expense_id}"
-    )
+    expense_id = created.json()["id"]
 
-    # ASSERT
+    response = client.delete(f"/expenses/{expense_id}")
+
     assert response.status_code == 204
     assert response.content == b""
 
-    # Verify expense was deleted
-    get_response = client.get(
-        f"/expenses/{expense_id}"
-    )
+    # Verify database deletion
+    assert db_session.get(Expense, expense_id) is None
 
-    assert get_response.status_code == 404
-    assert len(main.expenses) == 0
+    # Verify resource is no longer accessible
+    response = client.get(f"/expenses/{expense_id}")
 
-
-# =====================================================
-# TEST 6: HEALTH CHECK
-# GET /health
-# Expected: 200 OK
-# =====================================================
-
-def test_health_check():
-
-    # ACT
-    response = client.get("/health")
-
-    # ASSERT
-    assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.status_code == 404
 
 
 # =====================================================
-# TEST 7: INVALID EXPENSE AMOUNT
-# POST /expenses/
-# Expected: 422 Validation Error
+# 9. DELETE NONEXISTENT EXPENSE
 # =====================================================
 
-def test_invalid_expense_amount():
+def test_delete_expense_not_found(client):
 
-    # ARRANGE
-    invalid_data = sample_expense()
+    response = client.delete("/expenses/999999")
 
-    invalid_data["amount"] = "-50.00"
+    assert response.status_code == 404
 
-    # ACT
+
+# =====================================================
+# 10. INVALID REQUEST DATA
+# =====================================================
+
+@pytest.mark.parametrize(
+    "field, invalid_value",
+    [
+        ("amount", "-10.00"),
+        ("amount", "0.00"),
+        ("name", ""),
+        ("date", "invalid-date"),
+        ("amount", "10.123")
+    ]
+)
+def test_invalid_expense(
+    client,
+    sample_expense,
+    db_session,
+    field,
+    invalid_value
+):
+
+    sample_expense[field] = invalid_value
+
     response = client.post(
         "/expenses/",
-        json=invalid_data
+        json=sample_expense
     )
 
-    # ASSERT
     assert response.status_code == 422
 
-    # Verify invalid expense was not stored
-    assert len(main.expenses) == 0
+    errors = response.json()["detail"]
 
-
-# =====================================================
-# TEST 8: GET NONEXISTENT EXPENSE
-# GET /expenses/{expense_id}
-# Expected: 404 Not Found
-# =====================================================
-
-def test_get_nonexistent_expense():
-
-    # ACT
-    response = client.get("/expenses/999")
-
-    # ASSERT
-    assert response.status_code == 404
-
-    assert response.json() == {
-        "detail": "Expense not found"
-    }
-
-
-# =====================================================
-# TEST 9: UPDATE NONEXISTENT EXPENSE
-# PUT /expenses/{expense_id}
-# Expected: 404 Not Found
-# =====================================================
-
-def test_update_nonexistent_expense():
-
-    # ARRANGE
-    updated_data = sample_expense()
-
-    # ACT
-    response = client.put(
-        "/expenses/999",
-        json=updated_data
+    assert any(
+        error["loc"][-1] == field
+        for error in errors
     )
 
-    # ASSERT
-    assert response.status_code == 404
+    # Verify invalid data was not persisted
+    expenses = db_session.scalars(
+        select(Expense)
+    ).all()
 
-    assert response.json() == {
-        "detail": "Expense not found"
-    }
+    assert len(expenses) == 0
 
 
 # =====================================================
-# TEST 10: DELETE NONEXISTENT EXPENSE
-# DELETE /expenses/{expense_id}
-# Expected: 404 Not Found
+# 11. MISSING REQUIRED FIELD
 # =====================================================
 
-def test_delete_nonexistent_expense():
+def test_missing_required_field(
+    client,
+    sample_expense,
+    db_session
+):
 
-    # ACT
-    response = client.delete("/expenses/999")
+    del sample_expense["name"]
 
-    # ASSERT
-    assert response.status_code == 404
+    response = client.post(
+        "/expenses/",
+        json=sample_expense
+    )
 
-    assert response.json() == {
-        "detail": "Expense not found"
-    }
+    assert response.status_code == 422
+
+    assert db_session.scalars(
+        select(Expense)
+    ).all() == []
+
+
+# =====================================================
+# 12. INVALID UPDATE
+# =====================================================
+
+def test_invalid_update(client, sample_expense, db_session):
+
+    created = client.post(
+        "/expenses/",
+        json=sample_expense
+    )
+
+    assert created.status_code == 201
+
+    expense_id = created.json()["id"]
+
+    response = client.put(
+        f"/expenses/{expense_id}",
+        json={
+            **sample_expense,
+            "amount": "-50.00"
+        }
+    )
+
+    assert response.status_code == 422
+
+    # Verify original record was not modified
+    expense = db_session.get(Expense, expense_id)
+
+    assert expense is not None
+    assert expense.amount == Decimal("75.50")
+    assert expense.name == sample_expense["name"]
